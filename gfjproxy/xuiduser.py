@@ -15,6 +15,7 @@ import redis.exceptions
 import redis.lock
 from colorama.ansi import Fore as _colorama_ansi_fore
 
+from ._globals import PROCESS_TIMEOUT
 from .utils import base64url_encode, utctimestamp
 
 _color_palette = [
@@ -264,16 +265,26 @@ class RedisUserStorage(UserStorage):
             raise KeyError(repr(xuid))
 
     def lock(self, xuid: XUID) -> bool:
+        # The lock must outlive the longest request, otherwise it expires while
+        # the request is still being processed and another one can sneak in.
+        # The token is not thread local because the lock object may be released
+        # by a different greenlet than the one that acquired it.
         lockid = xuid.lockid()
-        if lockid not in self._locks:
-            self._locks[lockid] = self._client.lock(name=lockid, timeout=60)
-        return self._locks[lockid].acquire(blocking=False)
+        lock = self._client.lock(
+            name=lockid,
+            timeout=PROCESS_TIMEOUT + 10,
+            thread_local=False,
+        )
+        if not lock.acquire(blocking=False):
+            return False
+        self._locks[lockid] = lock
+        return True
 
     def unlock(self, xuid: XUID):
         if lock := self._locks.pop(xuid.lockid(), None):
             try:
                 lock.release()
-            except redis.exceptions.LockNotOwnedError:
+            except redis.exceptions.LockError:
                 pass
 
     def keyring_get(self, key: str) -> str | None:

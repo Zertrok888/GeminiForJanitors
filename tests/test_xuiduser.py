@@ -1,4 +1,5 @@
 import secrets
+import threading
 
 import pytest
 
@@ -222,6 +223,17 @@ def test_locking(storage):
     assert storage.lock(user_2)
     assert not storage.lock(user_2)
     storage.unlock(user_2)
+
+    # Ensure that a lock can be released by a different thread than the one
+    # that acquired it (gevent workers may unlock from another greenlet)
+    acquired = []
+    thread = threading.Thread(target=lambda: acquired.append(storage.lock(user_1)))
+    thread.start()
+    thread.join()
+    assert acquired == [True]
+    storage.unlock(user_1)
+    assert storage.lock(user_1)
+    storage.unlock(user_1)
 
 
 ################################################################################
