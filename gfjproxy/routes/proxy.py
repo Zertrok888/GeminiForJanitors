@@ -5,6 +5,7 @@ from secrets import token_hex
 from threading import Thread
 from time import monotonic, sleep
 from traceback import print_exception
+from typing import Any
 
 from flask import Blueprint, Response, abort, request
 
@@ -19,6 +20,8 @@ from ..xuid_secret import xuid_secret
 from ..xuiduser import XUID, UserSettings
 
 proxy = Blueprint("proxy", __name__)
+
+StreamSink = Callable[[str], None]
 
 # How long a stream response may stay silent before keepalives are sent, and
 # how often they are sent afterwards. Quick errors still get a proper status.
@@ -75,7 +78,7 @@ def handle():
             )
 
         xlog(xuid, "Repeated request, waiting for the original one")
-        return _respond(lambda: _wait_for_result(xuid, tag, response), fallback)
+        return _respond(lambda _: _wait_for_result(xuid, tag, response), fallback)
 
     user = UserSettings(storage, xuid)
 
@@ -95,10 +98,18 @@ def handle():
     tag = f"{fingerprint}:{token_hex(8)}"
     storage.inflight_put(xuid, tag)
 
-    def work() -> dict:
+    def work(stream_sink: StreamSink | None) -> dict:
         try:
             result = _result(
-                _process(user, jai_req, response, api_keys, proxy_test, request_path)
+                _process(
+                    user,
+                    jai_req,
+                    response,
+                    api_keys,
+                    proxy_test,
+                    request_path,
+                    stream_sink,
+                )
             )
             storage.result_put(tag, result)
             return result
@@ -116,6 +127,7 @@ def _process(
     api_keys: list[str],
     proxy_test: bool,
     request_path: str,
+    stream_sink: StreamSink | None,
 ) -> ResponseHelper:
     assert storage is not None  # Make type checkers happy
 
@@ -155,7 +167,7 @@ def _process(
         elif proxy_test:
             response = handle_proxy_test(user, jai_req, response)
         else:
-            response = handle_chat_message(user, jai_req, response)
+            response = handle_chat_message(user, jai_req, response, stream_sink)
     except Exception as e:  # ruff: ignore[BLE001]
         response.add_error("Internal Proxy Error", 500)
         print_exception(e)
@@ -211,30 +223,40 @@ def _result(response: ResponseHelper) -> dict:
         "content_type": built.content_type,
         "body": built.get_data(as_text=True),
         "stream_body": response.stream_body(),
+        "message": response.message,
     }
 
 
-def _respond(work: Callable[[], dict], fallback: ResponseHelper) -> Response:
+def _respond(
+    work: Callable[[StreamSink | None], dict], fallback: ResponseHelper
+) -> Response:
     """Runs the work in the background, so it finishes even if the client goes
-    away, and keeps a stream response alive while the work takes long."""
+    away. A stream response gets the text as the model writes it, if the work
+    passes any to the sink, and is kept alive while the work takes long."""
 
-    results: Queue[dict] = Queue(maxsize=1)
+    # Events are ("text", str) for pieces of text and ("done", dict) at the end
+    events: Queue[tuple[str, Any]] = Queue()
+
+    def stream_sink(text: str):
+        events.put(("text", text))
 
     def run():
         try:
-            result = work()
+            result = work(stream_sink if fallback.use_stream else None)
         except Exception as e:  # ruff: ignore[BLE001]
             print_exception(e)
             result = _result(fallback.add_error("Internal Proxy Error", 500))
-        results.put(result)
+        events.put(("done", result))
 
     Thread(target=run, daemon=True).start()
 
     try:
-        result = results.get(timeout=KEEPALIVE_DELAY if fallback.use_stream else None)
+        event = events.get(timeout=KEEPALIVE_DELAY if fallback.use_stream else None)
     except Empty:
-        pass
-    else:
+        event = None
+
+    if event is not None and event[0] == "done":
+        result = event[1]
         return Response(
             response=[result["body"]],
             status=result["status"],
@@ -243,19 +265,36 @@ def _respond(work: Callable[[], dict], fallback: ResponseHelper) -> Response:
 
     # From here on the status is 200 no matter what, errors become stream text
 
-    def generate():
-        yield ResponseHelper.STREAM_KEEPALIVE
+    def generate(event: tuple[str, Any] | None):
+        sent = ""
         while True:
-            try:
-                result = results.get(timeout=KEEPALIVE_INTERVAL)
-            except Empty:
+            if event is None:
                 yield ResponseHelper.STREAM_KEEPALIVE
+            elif event[0] == "text":
+                sent += event[1]
+                yield ResponseHelper.stream_chunk(event[1])
             else:
-                yield result["stream_body"]
+                yield ResponseHelper.stream_end(_unsent(event[1]["message"], sent))
                 return
+            try:
+                event = events.get(timeout=KEEPALIVE_INTERVAL)
+            except Empty:
+                event = None
 
     return Response(
-        response=generate(),
+        response=generate(event),
         status=200,
         content_type="text/event-stream; charset=utf-8",
     )
+
+
+def _unsent(message: str, sent: str) -> str:
+    """Returns the part of the final message that has not been streamed yet."""
+    if not sent:
+        return message
+    # The final message is stripped, so whitespace at the end may be missing
+    sent = sent.rstrip()
+    if message.startswith(sent):
+        return message[len(sent) :]
+    # Should not happen, but never leave the user with half a message
+    return f"\n\n{message}"

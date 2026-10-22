@@ -120,13 +120,35 @@ class ResponseHelper:
     def stream_body(self) -> str:
         """Event stream with the whole message, errors included, as one chunk.
         Used as is once a stream response has already started with status 200."""
+        return ResponseHelper.stream_end(self.message)
+
+    @staticmethod
+    def stream_chunk(text: str) -> str:
+        """Event stream chunk with a piece of the message."""
         return json.dumps(
             {
                 "choices": [
                     {
                         "index": 0,
                         "delta": {
-                            "content": self.message,
+                            "content": text,
+                        },
+                        "finish_reason": None,
+                    }
+                ]
+            }
+        ).join(("data: ", "\n\n"))
+
+    @staticmethod
+    def stream_end(text: str) -> str:
+        """Event stream chunk with the last piece of the message, then the end."""
+        return json.dumps(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": text,
                         },
                         "finish_reason": "stop",
                     }

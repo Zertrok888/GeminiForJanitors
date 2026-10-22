@@ -1,4 +1,5 @@
 import re
+from collections.abc import Callable
 from random import randint
 from typing import Any, cast
 
@@ -202,12 +203,46 @@ def handle_proxy_test(
     )
 
 
+def _text_sink(
+    stream_sink: Callable[[str], None], used_btrick: bool, prefix: str
+) -> Callable[[str], None]:
+    """Passes streamed text on the way it will look in the final response.
+
+    The prefix is whatever the response already has before the model text."""
+
+    started = False
+
+    def text_sink(text: str):
+        nonlocal started
+        if used_btrick:
+            text = text.replace("\u2800", " ")
+        if not started:
+            # The final response is stripped, so is the start of the stream
+            text = text.lstrip()
+            if not text:
+                return
+            started = True
+            if prefix:
+                text = f"{prefix}\n{text}"
+        stream_sink(text)
+
+    return text_sink
+
+
 def handle_chat_message(
-    user: UserSettings, jai_req: JaiRequest, response: ResponseHelper
+    user: UserSettings,
+    jai_req: JaiRequest,
+    response: ResponseHelper,
+    stream_sink: Callable[[str], None] | None = None,
 ) -> ResponseHelper:
     """Chat message handler.
 
-    This handles when the user sends a simple chat message to the bot."""
+    This handles when the user sends a simple chat message to the bot.
+
+    If stream_sink is given, the model may pass it pieces of its response text
+    as they are generated, while the whole response is still returned at the
+    end. Pieces are only passed when the final text is going to start with
+    them, i.e. there are no prefill or think tags to be removed from it."""
 
     # For in-prod print debugging and data mining lmao
     xlog(
@@ -450,6 +485,15 @@ def handle_chat_message(
 
         settings["search"] = True
 
+    if jai_req.use_nothink or user.use_nothink:
+        xlog(
+            user,
+            "Disabling model reasoning"
+            + (" (for this message only)." if not user.use_nothink else "."),
+        )
+
+        settings["thinking"] = False
+
     if jai_req.use_fixturns or user.use_fixturns:
         xlog(
             user,
@@ -459,6 +503,10 @@ def handle_chat_message(
 
         if jai_req.messages[-1].role != "user":
             jai_req.messages.append(JaiMessage(content=".", role="user"))
+
+    if stream_sink is not None and not (used_prefill or used_think):
+        xlog(user, "Streaming model response if supported")
+        settings["stream"] = _text_sink(stream_sink, used_btrick, response.message)
 
     result = _handle_request(
         user.xuid,

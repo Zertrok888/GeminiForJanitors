@@ -134,6 +134,7 @@ def aboutme(args, user, jai_req, response):
         f"\u200b- //noass {'on' if user.use_noass else 'off'}",
         f"\u200b- //dice_char {'on' if user.use_dice_char else 'off'}",
         f"\u200b- //nobot {'on' if user.use_nobot else 'off'}",
+        f"\u200b- //nothink {'on' if user.use_nothink else 'off'}",
         f"\u200b- //ooctrick {'on' if user.use_ooctrick else 'off'}",
         f"\u200b- //prefill {'on' if user.use_prefill else 'off'}",
         f"\u200b- //prefill_mode {user.prefill_mode}",
@@ -227,6 +228,16 @@ def nobot(args, user, jai_req, response):
         return response
     return response.add_proxy_message(
         f"Bot description {'omitted' if jai_req.use_nobot else 'kept'}"
+        + (" (for this message only)." if args == "this" else ".")
+    )
+
+
+@command(argspec=r"off|on|this", setting="nothink")
+def nothink(args, user, jai_req, response):
+    if jai_req.quiet_commands:
+        return response
+    return response.add_proxy_message(
+        f"Model reasoning {'disabled' if jai_req.use_nothink else 'enabled'}"
         + (" (for this message only)." if args == "this" else ".")
     )
 
@@ -465,6 +476,9 @@ Preset commands need to be called every time you want to use them.
 
 - `//nobot on|off|this`
   Removes the bot's description from the chat, in case it contains ToS-breaking content. *Note:* use this only as a last resort. This will negatively impact your chat.
+
+- `//nothink on|off|this`
+  Turns off the model's own reasoning, making replies faster. Only for Nvidia NIM models that support it, such as GLM.
 
 - `//preset gigakostyl`
   Adds a simple writing guideline for NSFW roleplay, plus "X-ray views" to sex scenes.

@@ -1,3 +1,5 @@
+import json
+from collections.abc import Callable
 from typing import Any
 
 import httpx2
@@ -24,6 +26,63 @@ def _simplify_error_message(message: str) -> str:
     return message
 
 
+NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
+
+
+class _StreamError(Exception):
+    """Error reported by Nvidia NIM in the middle of a stream."""
+
+
+def _post_stream(
+    nvidia_request: dict[str, Any],
+    headers: dict[str, str],
+    stream_sink: Callable[[str], None],
+) -> dict[str, Any]:
+    """Streams the response, passing each piece of text to the sink as it comes.
+    Returns the whole response shaped like a non-streamed one."""
+
+    content: list[str] = []
+    usage = None
+
+    with http_client.stream(
+        "POST",
+        NVIDIA_URL,
+        json=nvidia_request,
+        headers=headers,
+        timeout=PROCESS_TIMEOUT,
+    ) as nvidia_response:
+        if nvidia_response.is_error:
+            nvidia_response.read()  # Error handling needs the whole body
+        nvidia_response.raise_for_status()
+
+        for line in nvidia_response.iter_lines():
+            if not line.startswith("data:"):
+                continue
+            data = line.removeprefix("data:").strip()
+            if data == "[DONE]":
+                break
+
+            chunk = json.loads(data)
+            if error := chunk.get("error"):
+                raise _StreamError(
+                    error.get("message", repr(error))
+                    if isinstance(error, dict)
+                    else str(error)
+                )
+            if chunk.get("usage"):
+                usage = chunk["usage"]
+            for choice in chunk.get("choices") or []:
+                # Reasoning comes as "reasoning_content" and is left out
+                if text := (choice.get("delta") or {}).get("content"):
+                    content.append(text)
+                    stream_sink(text)
+
+    return {
+        "choices": [{"message": {"content": "".join(content)}}],
+        "usage": usage,
+    }
+
+
 def nvidia_generate_content(
     user: XUID,
     api_key: str,
@@ -33,7 +92,8 @@ def nvidia_generate_content(
 ) -> JaiResult:
     """Wrapper around Nvidia NIM API.
 
-    User paramater is only used for logging."""
+    User paramater is only used for logging. A callable "stream" setting gets
+    pieces of the response text as they are generated."""
 
     if len(messages) == 1 and messages[0].role == "assistant":
         # For some models, "conversation roles must alternate user/assistant/user/assistant/"
@@ -51,8 +111,14 @@ def nvidia_generate_content(
         ],
     }
 
+    stream_sink: Callable[[str], None] | None = None
+
     for key, value in (settings or {}).items():
-        if key == "temperature":
+        if key == "stream" and callable(value):
+            stream_sink = value
+            nvidia_request["stream"] = True
+            nvidia_request["stream_options"] = {"include_usage": True}
+        elif key == "temperature":
             nvidia_request["temperature"] = value
         elif key == "max_tokens":
             nvidia_request["max_tokens"] = value
@@ -64,6 +130,9 @@ def nvidia_generate_content(
             nvidia_request["frequency_penalty"] = value
         elif key == "repetition_penalty":
             nvidia_request["presence_penalty"] = value
+        elif key == "thinking":
+            # Reasoning models like GLM toggle thinking through their chat template
+            nvidia_request["chat_template_kwargs"] = {"enable_thinking": bool(value)}
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -71,14 +140,17 @@ def nvidia_generate_content(
     }
 
     try:
-        nvidia_response = http_client.post(
-            "https://integrate.api.nvidia.com/v1/chat/completions",
-            json=nvidia_request,
-            headers=headers,
-            timeout=PROCESS_TIMEOUT,
-        )
-        nvidia_response.raise_for_status()
-        nvidia_result = nvidia_response.json()
+        if stream_sink is not None:
+            nvidia_result = _post_stream(nvidia_request, headers, stream_sink)
+        else:
+            nvidia_response = http_client.post(
+                NVIDIA_URL,
+                json=nvidia_request,
+                headers=headers,
+                timeout=PROCESS_TIMEOUT,
+            )
+            nvidia_response.raise_for_status()
+            nvidia_result = nvidia_response.json()
     except httpx2.TimeoutException:
         track_stats("nvidia.time_out")
         return JaiResult(504, "Gateway Timeout")
@@ -114,6 +186,11 @@ def nvidia_generate_content(
             track_stats("nvidia.failed.unknown")
 
         return JaiResult(e.response.status_code, message, extras=extras)
+    except _StreamError as e:
+        track_stats("nvidia.failed.server")
+        return JaiResult(
+            502, f"Error from Nvidia NIM: {_simplify_error_message(str(e))}"
+        )
     except Exception as e:  # ruff: ignore[BLE001]
         xlog(user, repr(e))
         track_stats("nvidia.failed.exception")

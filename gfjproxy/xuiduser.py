@@ -453,6 +453,14 @@ class UserSettings:
         self._data["use_nobot"] = bool(value)
 
     @property
+    def use_nothink(self) -> bool:
+        return bool(self._data.get("use_nothink", False))
+
+    @use_nothink.setter
+    def use_nothink(self, value):
+        self._data["use_nothink"] = bool(value)
+
+    @property
     def use_ooctrick(self) -> bool:
         return bool(self._data.get("use_ooctrick", False))
 

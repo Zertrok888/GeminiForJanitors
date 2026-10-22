@@ -40,7 +40,7 @@ def api_key() -> str:
 
 
 def mock_slow_handler(mocker: MockerFixture, delay: float, text: str = "Hello"):
-    def handler(user, jai_req, response):
+    def handler(user, jai_req, response, stream_sink=None):
         time.sleep(delay)
         return response.add_message(text)
 
@@ -158,7 +158,7 @@ def test_slow_stream_error_is_sent_as_text(app, api_key, mocker: MockerFixture):
     mocker.patch.object(proxy_route, "KEEPALIVE_DELAY", 0.1)
     mocker.patch.object(proxy_route, "KEEPALIVE_INTERVAL", 0.1)
 
-    def handler(user, jai_req, response):
+    def handler(user, jai_req, response, stream_sink=None):
         time.sleep(0.3)
         return response.add_error("Something broke", 503)
 

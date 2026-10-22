@@ -70,6 +70,7 @@ class JaiRequest:
     use_dice_char: bool = False
     use_noass: bool = False
     use_nobot: bool = False
+    use_nothink: bool = False
     use_ooctrick: bool = False
     use_prefill: bool = False
     use_preset: str | None = None
