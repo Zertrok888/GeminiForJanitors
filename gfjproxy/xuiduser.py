@@ -9,6 +9,7 @@ import json
 from hashlib import sha256
 from hmac import digest
 from threading import Lock
+from time import monotonic
 
 import redis
 import redis.exceptions
@@ -30,6 +31,9 @@ _color_palette = [
 ]
 
 _color_reset = _colorama_ansi_fore.RESET
+
+# Results are only kept for repeated requests that were waiting on the original
+RESULT_EXPIRY_IN_SECONDS = 120
 
 ################################################################################
 
@@ -143,6 +147,28 @@ class UserStorage:
         """Unlocks the storage and allow future access."""
         raise NotImplementedError("UserStorage.unlock")
 
+    def inflight_get(self, xuid: XUID) -> str | None:
+        """Gets the tag of the request currently being processed for the user.
+        Returns None if there is no such request."""
+        raise NotImplementedError("UserStorage.inflight_get")
+
+    def inflight_put(self, xuid: XUID, tag: str):
+        """Marks a request as currently being processed for the user."""
+        raise NotImplementedError("UserStorage.inflight_put")
+
+    def inflight_rem(self, xuid: XUID):
+        """Clears the request currently being processed for the user, if any."""
+        raise NotImplementedError("UserStorage.inflight_rem")
+
+    def result_get(self, key: str) -> dict | None:
+        """Gets the result of a finished request.
+        Returns None if the result is not present or has expired."""
+        raise NotImplementedError("UserStorage.result_get")
+
+    def result_put(self, key: str, data: dict):
+        """Puts the result of a finished request for a short while."""
+        raise NotImplementedError("UserStorage.result_put")
+
     def keyring_get(self, key: str) -> str | None:
         """Gets raw data from the keyring.
         Returns None if the key is not present on the keyring."""
@@ -166,6 +192,8 @@ class LocalUserStorage(UserStorage):
         self._storage: dict[XUID, dict] = {}
         self._keyring: dict[str, str] = {}
         self._locks: dict[str, Lock] = {}
+        self._inflight: dict[str, str] = {}
+        self._results: dict[str, tuple[float, dict]] = {}
 
     def active(self) -> bool:
         return True
@@ -204,6 +232,26 @@ class LocalUserStorage(UserStorage):
     def unlock(self, xuid: XUID):
         if lock := self._locks.pop(xuid.lockid(), None):
             lock.release()
+
+    def inflight_get(self, xuid: XUID) -> str | None:
+        return self._inflight.get(xuid.lockid())
+
+    def inflight_put(self, xuid: XUID, tag: str):
+        self._inflight[xuid.lockid()] = tag
+
+    def inflight_rem(self, xuid: XUID):
+        self._inflight.pop(xuid.lockid(), None)
+
+    def result_get(self, key: str) -> dict | None:
+        if (entry := self._results.get(key)) and entry[0] > monotonic():
+            return entry[1]
+        return None
+
+    def result_put(self, key: str, data: dict):
+        now = monotonic()
+        for old_key in [k for k, (expiry, _) in self._results.items() if expiry <= now]:
+            del self._results[old_key]
+        self._results[key] = (now + RESULT_EXPIRY_IN_SECONDS, data)
 
     def keyring_get(self, key: str) -> str | None:
         return self._keyring.get(key)
@@ -286,6 +334,27 @@ class RedisUserStorage(UserStorage):
                 lock.release()
             except redis.exceptions.LockError:
                 pass
+
+    def inflight_get(self, xuid: XUID) -> str | None:
+        data = self._client.get(f"{xuid.lockid()}:inflight")
+        if isinstance(data, bytes):
+            return data.decode("utf-8")
+        return None
+
+    def inflight_put(self, xuid: XUID, tag: str):
+        self._client.set(f"{xuid.lockid()}:inflight", tag, ex=PROCESS_TIMEOUT + 10)
+
+    def inflight_rem(self, xuid: XUID):
+        self._client.delete(f"{xuid.lockid()}:inflight")
+
+    def result_get(self, key: str) -> dict | None:
+        data = self._client.get(f"result:{key}")
+        if isinstance(data, bytes):
+            return json.loads(data)
+        return None
+
+    def result_put(self, key: str, data: dict):
+        self._client.set(f"result:{key}", json.dumps(data), ex=RESULT_EXPIRY_IN_SECONDS)
 
     def keyring_get(self, key: str) -> str | None:
         data = self._client.get(f"keyring:{key}")

@@ -1,7 +1,14 @@
+from collections.abc import Callable
+from hashlib import sha256
+from queue import Empty, Queue
+from secrets import token_hex
+from threading import Thread
+from time import monotonic, sleep
 from traceback import print_exception
 
-from flask import Blueprint, abort, request
+from flask import Blueprint, Response, abort, request
 
+from .._globals import PROCESS_TIMEOUT
 from ..cooldown import get_cooldown
 from ..handlers import handle_chat_message, handle_proxy_test
 from ..logging import xlog, xlogtime
@@ -12,6 +19,14 @@ from ..xuid_secret import xuid_secret
 from ..xuiduser import XUID, UserSettings
 
 proxy = Blueprint("proxy", __name__)
+
+# How long a stream response may stay silent before keepalives are sent, and
+# how often they are sent afterwards. Quick errors still get a proper status.
+KEEPALIVE_DELAY = 15
+KEEPALIVE_INTERVAL = 10
+
+# How often a repeated request checks whether the original one has finished
+WAIT_POLL_INTERVAL = 1
 
 
 @proxy.route("/", methods=["POST"])
@@ -34,6 +49,7 @@ def handle():
     proxy_test = is_proxy_test(request_json)
 
     response = ResponseHelper(use_stream=jai_req.stream, wrap_errors=proxy_test)
+    fallback = ResponseHelper(use_stream=jai_req.stream, wrap_errors=proxy_test)
 
     # JanitorAI provides the user's API key through HTTP Bearer authentication.
     # Google AI cannot be used without an API key and neither can this proxy.
@@ -45,11 +61,21 @@ def handle():
     api_keys = comma_split(request_auth[1])
     xuid = XUID(api_keys[0], xuid_secret)
 
+    # JanitorAI gives up on slow responses and sends the very same request again.
+    # Such a repeat waits for the original request and gets its result instead.
+
+    fingerprint = sha256(request_path.encode() + request.get_data()).hexdigest()
+
     if not storage.lock(xuid):
-        xlog(xuid, "User attempted concurrent use")
-        return response.build_error(
-            "Concurrent use is not allowed. Please wait a moment.", 403
-        )
+        tag = storage.inflight_get(xuid)
+        if tag is None or tag.partition(":")[0] != fingerprint:
+            xlog(xuid, "User attempted concurrent use")
+            return response.build_error(
+                "Concurrent use is not allowed. Please wait a moment.", 403
+            )
+
+        xlog(xuid, "Repeated request, waiting for the original one")
+        return _respond(lambda: _wait_for_result(xuid, tag, response), fallback)
 
     user = UserSettings(storage, xuid)
 
@@ -65,6 +91,33 @@ def handle():
         return response.build_error(f"Please wait {delay} seconds.", 429)
 
     # Handle user's request
+
+    tag = f"{fingerprint}:{token_hex(8)}"
+    storage.inflight_put(xuid, tag)
+
+    def work() -> dict:
+        try:
+            result = _result(
+                _process(user, jai_req, response, api_keys, proxy_test, request_path)
+            )
+            storage.result_put(tag, result)
+            return result
+        finally:
+            storage.inflight_rem(xuid)
+            storage.unlock(xuid)
+
+    return _respond(work, fallback)
+
+
+def _process(
+    user: UserSettings,
+    jai_req: JaiRequest,
+    response: ResponseHelper,
+    api_keys: list[str],
+    proxy_test: bool,
+    request_path: str,
+) -> ResponseHelper:
+    assert storage is not None  # Make type checkers happy
 
     rcounter = user.get_rcounter()
     api_key_index = rcounter % len(api_keys)
@@ -123,6 +176,86 @@ def handle():
     else:
         xlog(user, "Invalid user not saved")
 
-    storage.unlock(xuid)
+    return response
 
-    return response.build()
+
+def _wait_for_result(xuid: XUID, tag: str, response: ResponseHelper) -> dict:
+    """Waits for the original request with the given tag and returns its result."""
+    assert storage is not None  # Make type checkers happy
+
+    deadline = monotonic() + PROCESS_TIMEOUT + 10
+
+    while monotonic() < deadline:
+        if (result := storage.result_get(tag)) is not None:
+            xlog(xuid, "Repeated request got the original result")
+            return result
+        if storage.inflight_get(xuid) != tag:
+            # The original request may have finished right after the check above
+            if (result := storage.result_get(tag)) is not None:
+                xlog(xuid, "Repeated request got the original result")
+                return result
+            break
+        sleep(WAIT_POLL_INTERVAL)
+
+    xlog(xuid, "Repeated request lost the original one")
+    return _result(
+        response.add_error("The original request was lost. Please try again.", 504)
+    )
+
+
+def _result(response: ResponseHelper) -> dict:
+    """Turns a response into plain data that can be shared between requests."""
+    built = response.build()
+    return {
+        "status": built.status_code,
+        "content_type": built.content_type,
+        "body": built.get_data(as_text=True),
+        "stream_body": response.stream_body(),
+    }
+
+
+def _respond(work: Callable[[], dict], fallback: ResponseHelper) -> Response:
+    """Runs the work in the background, so it finishes even if the client goes
+    away, and keeps a stream response alive while the work takes long."""
+
+    results: Queue[dict] = Queue(maxsize=1)
+
+    def run():
+        try:
+            result = work()
+        except Exception as e:  # ruff: ignore[BLE001]
+            print_exception(e)
+            result = _result(fallback.add_error("Internal Proxy Error", 500))
+        results.put(result)
+
+    Thread(target=run, daemon=True).start()
+
+    try:
+        result = results.get(timeout=KEEPALIVE_DELAY if fallback.use_stream else None)
+    except Empty:
+        pass
+    else:
+        return Response(
+            response=[result["body"]],
+            status=result["status"],
+            content_type=result["content_type"],
+        )
+
+    # From here on the status is 200 no matter what, errors become stream text
+
+    def generate():
+        yield ResponseHelper.STREAM_KEEPALIVE
+        while True:
+            try:
+                result = results.get(timeout=KEEPALIVE_INTERVAL)
+            except Empty:
+                yield ResponseHelper.STREAM_KEEPALIVE
+            else:
+                yield result["stream_body"]
+                return
+
+    return Response(
+        response=generate(),
+        status=200,
+        content_type="text/event-stream; charset=utf-8",
+    )

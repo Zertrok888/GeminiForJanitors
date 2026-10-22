@@ -91,21 +91,7 @@ class ResponseHelper:
                 )
         elif self._use_stream:
             return Response(
-                response=[
-                    json.dumps(
-                        {
-                            "choices": [
-                                {
-                                    "index": 0,
-                                    "delta": {
-                                        "content": self.message,
-                                    },
-                                    "finish_reason": "stop",
-                                }
-                            ]
-                        }
-                    ).join(("data: ", "\n\ndata: [DONE]\n\n")),
-                ],
+                response=[self.stream_body()],
                 status=200,
                 content_type="text/event-stream; charset=utf-8",
             )
@@ -130,6 +116,30 @@ class ResponseHelper:
                 status=200,
                 content_type="application/json; charset=utf-8",
             )
+
+    def stream_body(self) -> str:
+        """Event stream with the whole message, errors included, as one chunk.
+        Used as is once a stream response has already started with status 200."""
+        return json.dumps(
+            {
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {
+                            "content": self.message,
+                        },
+                        "finish_reason": "stop",
+                    }
+                ]
+            }
+        ).join(("data: ", "\n\ndata: [DONE]\n\n"))
+
+    # An empty chunk that keeps a stream connection from going idle
+    STREAM_KEEPALIVE = 'data: {"choices": [{"index": 0, "delta": {"content": ""}, "finish_reason": null}]}\n\n'
+
+    @property
+    def use_stream(self) -> bool:
+        return self._use_stream
 
     def build_error(self, message, status_code: int):
         return self.add_error(message, status_code).build()
