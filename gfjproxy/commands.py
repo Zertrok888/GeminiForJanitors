@@ -676,6 +676,14 @@ To use any model through OpenRouter, you must add `openrouter/` first and then t
 
 All API keys that start with `sk-or-v1-` will be used with OpenRouter.
 
+## **AI STAR** (`starimg`)
+
+`https://ai.starimg.ru/`
+
+To use any AI STAR model, you must add `starimg/` at the start, e.g. `starimg/claude-sonnet-5-5`.
+
+All API keys that start with `sk-star-` will be used with AI STAR.
+
 ## **Z.AI** (`z_ai`)
 
 `https://chat.z.ai/`

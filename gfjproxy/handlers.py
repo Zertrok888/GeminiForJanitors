@@ -15,6 +15,7 @@ from .providers.gemini_cli import gemini_cli_generate_content
 from .providers.nvidia import nvidia_generate_content
 from .providers.openrouter import openrouter_generate_content
 from .providers.proxy import proxy_generate_content
+from .providers.starimg import starimg_generate_content
 from .providers.z_ai import z_ai_generate_content
 from .statistics import track_stats
 from .utils import ResponseHelper
@@ -30,6 +31,7 @@ API_KEY_PREFIXES = {
     "sk-ant-": "anthropic",
     "sk-or-v1-": "openrouter",
     "sk-proj-": "openai",
+    "sk-star-": "starimg",
     "gfjproxy.gemini_cli.": "gemini_cli",
 }
 
@@ -41,6 +43,7 @@ PROVIDER_FUNCS = {
     "nvidia": nvidia_generate_content,
     "openrouter": openrouter_generate_content,
     "proxy": proxy_generate_content,
+    "starimg": starimg_generate_content,
     "z_ai": z_ai_generate_content,
 }
 
@@ -86,6 +89,7 @@ def _handle_request(
                 "- If the key is for Nvidia NIM, add `nvidia/` at the start of it.\n"
                 "- If the key is for Z.AI, add `z_ai/` at the start of it.\n"
                 "- If the key is for OpenRouter, add `openrouter/` at the start of it.\n"
+                "- If the key is for AI STAR, add `starimg/` at the start of it.\n"
                 # No mention of Gemini CLI since support is WIP and its API key always resolve
             ),
             metadata=JaiResultMetadata(api_key_valid=False),

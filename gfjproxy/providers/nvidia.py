@@ -1,4 +1,3 @@
-import json
 from collections.abc import Callable
 from typing import Any
 
@@ -10,6 +9,7 @@ from ..logging import xlog
 from ..models import JaiMessage, JaiResult, JaiResultMetadata, JaiResultTokenUsage
 from ..statistics import track_stats
 from ..xuiduser import XUID
+from .openai_stream import StreamError, post_stream
 
 
 def _simplify_error_message(message: str) -> str:
@@ -27,60 +27,6 @@ def _simplify_error_message(message: str) -> str:
 
 
 NVIDIA_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
-
-
-class _StreamError(Exception):
-    """Error reported by Nvidia NIM in the middle of a stream."""
-
-
-def _post_stream(
-    nvidia_request: dict[str, Any],
-    headers: dict[str, str],
-    stream_sink: Callable[[str], None],
-) -> dict[str, Any]:
-    """Streams the response, passing each piece of text to the sink as it comes.
-    Returns the whole response shaped like a non-streamed one."""
-
-    content: list[str] = []
-    usage = None
-
-    with http_client.stream(
-        "POST",
-        NVIDIA_URL,
-        json=nvidia_request,
-        headers=headers,
-        timeout=PROCESS_TIMEOUT,
-    ) as nvidia_response:
-        if nvidia_response.is_error:
-            nvidia_response.read()  # Error handling needs the whole body
-        nvidia_response.raise_for_status()
-
-        for line in nvidia_response.iter_lines():
-            if not line.startswith("data:"):
-                continue
-            data = line.removeprefix("data:").strip()
-            if data == "[DONE]":
-                break
-
-            chunk = json.loads(data)
-            if error := chunk.get("error"):
-                raise _StreamError(
-                    error.get("message", repr(error))
-                    if isinstance(error, dict)
-                    else str(error)
-                )
-            if chunk.get("usage"):
-                usage = chunk["usage"]
-            for choice in chunk.get("choices") or []:
-                # Reasoning comes as "reasoning_content" and is left out
-                if text := (choice.get("delta") or {}).get("content"):
-                    content.append(text)
-                    stream_sink(text)
-
-    return {
-        "choices": [{"message": {"content": "".join(content)}}],
-        "usage": usage,
-    }
 
 
 def nvidia_generate_content(
@@ -141,7 +87,9 @@ def nvidia_generate_content(
 
     try:
         if stream_sink is not None:
-            nvidia_result = _post_stream(nvidia_request, headers, stream_sink)
+            nvidia_result = post_stream(
+                NVIDIA_URL, nvidia_request, headers, stream_sink
+            )
         else:
             nvidia_response = http_client.post(
                 NVIDIA_URL,
@@ -186,7 +134,7 @@ def nvidia_generate_content(
             track_stats("nvidia.failed.unknown")
 
         return JaiResult(e.response.status_code, message, extras=extras)
-    except _StreamError as e:
+    except StreamError as e:
         track_stats("nvidia.failed.server")
         return JaiResult(
             502, f"Error from Nvidia NIM: {_simplify_error_message(str(e))}"

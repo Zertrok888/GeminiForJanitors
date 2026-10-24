@@ -10,7 +10,7 @@ from pytest_mock import MockerFixture
 from gfjproxy import handlers
 from gfjproxy.handlers import handle_chat_message
 from gfjproxy.models import JaiMessage, JaiRequest, JaiResult
-from gfjproxy.providers import nvidia
+from gfjproxy.providers import nvidia, openai_stream, starimg
 from gfjproxy.routes import proxy as proxy_route
 from gfjproxy.utils import ResponseHelper
 from gfjproxy.xuiduser import XUID, LocalUserStorage, UserSettings
@@ -44,6 +44,8 @@ def use_transport(mocker: MockerFixture, handler) -> list[httpx2.Request]:
 
     client = httpx2.Client(transport=httpx2.MockTransport(record))
     mocker.patch.object(nvidia, "http_client", client)
+    mocker.patch.object(starimg, "http_client", client)
+    mocker.patch.object(openai_stream, "http_client", client)
     return requests
 
 
@@ -156,6 +158,107 @@ def test_nvidia_thinking_setting(mocker: MockerFixture, thinking: bool):
 
     sent = json.loads(requests[0].content)
     assert sent["chat_template_kwargs"] == {"enable_thinking": thinking}
+
+
+################################################################################
+
+# AI STAR provider
+
+
+def test_starimg_stream_passes_text_to_sink(mocker: MockerFixture):
+    body = sse(
+        {"choices": [{"index": 0, "delta": {"role": "assistant"}}]},
+        delta(content="Hi!"),
+        delta(content=" How are you?"),
+        {"choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 8}},
+        "[DONE]",
+    )
+    requests = use_transport(mocker, lambda _: httpx2.Response(200, content=body))
+
+    pieces = []
+    result = starimg.starimg_generate_content(
+        XUID("john", "smith"),
+        "sk-star-key",
+        "claude-sonnet-5-5",
+        [JaiMessage(content="Hi", role="user")],
+        {"stream": pieces.append, "temperature": 0.7},
+    )
+
+    assert result.text == "Hi! How are you?"
+    assert pieces == ["Hi!", " How are you?"]
+    assert result.metadata.token_usage.completion_tokens == 8
+
+    assert str(requests[0].url) == starimg.STARIMG_URL
+    assert requests[0].headers["authorization"] == "Bearer sk-star-key"
+    sent = json.loads(requests[0].content)
+    assert sent["model"] == "claude-sonnet-5-5"
+    assert sent["stream"] is True
+    assert sent["temperature"] == 0.7
+
+
+def test_starimg_without_sink_does_not_stream(mocker: MockerFixture):
+    reply = {"choices": [{"message": {"content": "Hello", "role": "assistant"}}]}
+    requests = use_transport(mocker, lambda _: httpx2.Response(200, json=reply))
+
+    result = starimg.starimg_generate_content(
+        XUID("john", "smith"),
+        "sk-star-key",
+        "claude-haiku-4-5",
+        [JaiMessage(content="Hi", role="user")],
+    )
+
+    assert result.text == "Hello"
+    assert json.loads(requests[0].content)["stream"] is False
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_starimg_http_error(mocker: MockerFixture, stream: bool):
+    error = {
+        "error": {
+            "message": "Invalid API key.",
+            "type": "authentication_error",
+            "code": "invalid_api_key",
+        }
+    }
+    use_transport(mocker, lambda _: httpx2.Response(401, json=error))
+
+    result = starimg.starimg_generate_content(
+        XUID("john", "smith"),
+        "sk-star-key",
+        "claude-haiku-4-5",
+        [JaiMessage(content="Hi", role="user")],
+        {"stream": lambda _: None} if stream else {},
+    )
+
+    assert result.status == 401
+    assert result.error == "Error from AI STAR (invalid_api_key): Invalid API key."
+
+
+def test_starimg_key_and_model_routing(mocker: MockerFixture):
+    calls = []
+
+    def fake_starimg(user, api_key, model, messages, settings=None):
+        calls.append((api_key, model))
+        return JaiResult(200, "Hi!")
+
+    mocker.patch.dict(handlers.PROVIDER_FUNCS, {"starimg": fake_starimg})
+
+    jai_req = JaiRequest.parse(
+        {
+            "model": "starimg/claude-sonnet-5-5",
+            "messages": [
+                {"role": "system", "content": "You are a bot."},
+                {"role": "user", "content": "Hello"},
+            ],
+        }
+    )
+    jai_req.api_key = "sk-star-key"
+    user = UserSettings(LocalUserStorage(), XUID("john", "smith"))
+
+    response = handle_chat_message(user, jai_req, ResponseHelper())
+
+    assert calls == [("sk-star-key", "claude-sonnet-5-5")]
+    assert response.message.startswith("Hi!")
 
 
 ################################################################################
