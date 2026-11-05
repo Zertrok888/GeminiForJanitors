@@ -1,6 +1,5 @@
 import re
 from collections.abc import Callable
-from functools import partial
 from random import randint
 from typing import Any, cast
 
@@ -10,13 +9,14 @@ from .logging import xlog
 from .models import JaiMessage, JaiRequest, JaiResult, JaiResultMetadata
 from .prefill import apply_prefill, clear_prefill
 from .providers.cerebras import cerebras_generate_content
+from .providers.claude_n_codex import claude_n_codex_generate_content
 from .providers.deepseek import deepseek_generate_content
 from .providers.gemini import gemini_generate_content
 from .providers.gemini_cli import gemini_cli_generate_content
 from .providers.nvidia import nvidia_generate_content
 from .providers.openrouter import openrouter_generate_content
 from .providers.proxy import proxy_generate_content
-from .providers.starimg import reseller_generate_content, starimg_generate_content
+from .providers.starimg import starimg_generate_content
 from .providers.z_ai import z_ai_generate_content
 from .statistics import track_stats
 from .utils import ResponseHelper
@@ -39,12 +39,7 @@ API_KEY_PREFIXES = {
 
 PROVIDER_FUNCS = {
     "cerebras": cerebras_generate_content,
-    "claude_n_codex": partial(
-        reseller_generate_content,
-        url="https://claude-n-codex.com:8443/v1/chat/completions",
-        provider="claude_n_codex",
-        label="Claude n Codex",
-    ),
+    "claude_n_codex": claude_n_codex_generate_content,
     "deepseek": deepseek_generate_content,
     "gemini_cli": gemini_cli_generate_content,
     "google": gemini_generate_content,
@@ -487,6 +482,16 @@ def handle_chat_message(
             )
 
             settings[setting] = value
+
+    if jai_req.use_lore:
+        provider_name, _ = _resolve_provider(jai_req.api_key)
+        lore_query = last_user_message.content.split(fwp_prefill, 1)[0].strip()
+        if provider_name != "claude_n_codex":
+            response.add_proxy_message("//lore is available with Claude n Codex.")
+        elif not lore_query or lore_query == ".":
+            response.add_proxy_message("Add a topic after //lore to search for it.")
+        else:
+            settings["lore_query"] = lore_query
 
     if jai_req.use_search or user.use_search:
         xlog(

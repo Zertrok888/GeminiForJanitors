@@ -232,6 +232,12 @@ def nobot(args, user, jai_req, response):
     )
 
 
+@command()
+def lore(args, user, jai_req, response):
+    jai_req.use_lore = True
+    return response
+
+
 @command(argspec=r"off|on|this", setting="nothink")
 def nothink(args, user, jai_req, response):
     if jai_req.quiet_commands:
@@ -465,6 +471,8 @@ Preset commands need to be called every time you want to use them.
 - `//prefill_mode 0|1|2|3`
   Selects what kind of prefill/jailbreak to use: classic (0), interaction config (1), starter (2), combined (3).
 
+- `//lore <topic>`
+  Look up lore for this turn with Claude n Codex (one web search maximum).
 - `//search on|off|this`
   Enables the use of Google Search, allowing the model to look up any information relevant to the chat.
 

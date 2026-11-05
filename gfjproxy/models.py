@@ -69,6 +69,7 @@ class JaiRequest:
     use_btrick: bool = False
     use_dice_char: bool = False
     use_noass: bool = False
+    use_lore: bool = False
     use_nobot: bool = False
     use_nothink: bool = False
     use_ooctrick: bool = False
