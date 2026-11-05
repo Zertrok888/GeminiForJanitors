@@ -330,7 +330,12 @@ def handle_chat_message(
             "</system>",
         )
 
-    if jai_req.use_think or user.use_think:
+    provider_name, _ = _resolve_provider(jai_req.api_key)
+    deepthink = jai_req.use_deepthink and provider_name == "claude_n_codex"
+    if jai_req.use_deepthink and not deepthink:
+        response.add_proxy_message("//deepthink is available with Claude n Codex.")
+
+    if not deepthink and (jai_req.use_think or user.use_think):
         xlog(
             user,
             "Adding thinking to chat"
@@ -483,8 +488,10 @@ def handle_chat_message(
 
             settings[setting] = value
 
+    if deepthink:
+        settings["deepthink"] = True
+
     if jai_req.use_lore:
-        provider_name, _ = _resolve_provider(jai_req.api_key)
         lore_query = last_user_message.content.split(fwp_prefill, 1)[0].strip()
         if provider_name != "claude_n_codex":
             response.add_proxy_message("//lore is available with Claude n Codex.")

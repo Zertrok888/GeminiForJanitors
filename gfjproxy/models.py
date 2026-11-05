@@ -67,6 +67,7 @@ class JaiRequest:
     # Commands
     use_fixturns: bool = False
     use_btrick: bool = False
+    use_deepthink: bool = False
     use_dice_char: bool = False
     use_noass: bool = False
     use_lore: bool = False

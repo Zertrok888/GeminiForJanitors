@@ -4,7 +4,7 @@ import httpx2
 
 from .._globals import PROCESS_TIMEOUT
 from ..http_client import http_client
-from ..models import JaiMessage, JaiResult
+from ..models import JaiMessage, JaiResult, JaiResultMetadata, JaiResultTokenUsage
 from ..xuiduser import XUID
 from .starimg import reseller_generate_content
 
@@ -82,6 +82,9 @@ def claude_n_codex_generate_content(
             *messages,
         ]
 
+    if (settings or {}).get("deepthink"):
+        return _generate_with_thinking(api_key, model, messages)
+
     return reseller_generate_content(
         user,
         api_key,
@@ -91,4 +94,66 @@ def claude_n_codex_generate_content(
         url=f"{BASE_URL}/chat/completions",
         provider="claude_n_codex",
         label="Claude n Codex",
+    )
+
+
+def _generate_with_thinking(
+    api_key: str, model: str, messages: list[JaiMessage]
+) -> JaiResult:
+    system = []
+    conversation = []
+    for message in messages:
+        if message.role == "system":
+            system.append(message.content)
+        else:
+            conversation.append({"role": message.role, "content": message.content})
+
+    if not conversation or conversation[-1]["role"] == "assistant":
+        conversation.append({"role": "user", "content": "Continue the scene."})
+
+    try:
+        response = http_client.post(
+            f"{BASE_URL}/messages",
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "anthropic-version": "2023-06-01",
+            },
+            json={
+                "model": model,
+                "max_tokens": 8192,
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": "high"},
+                "system": "\n\n".join(system),
+                "messages": conversation,
+            },
+            timeout=PROCESS_TIMEOUT,
+        )
+        response.raise_for_status()
+        result = response.json()
+        answer = "\n".join(
+            block["text"] for block in result["content"] if block["type"] == "text"
+        ).strip()
+        usage = result.get("usage", {})
+    except httpx2.TimeoutException:
+        return JaiResult(504, "Claude n Codex thinking request timed out.")
+    except httpx2.HTTPStatusError as exc:
+        return JaiResult(
+            exc.response.status_code,
+            "Claude n Codex rejected //deepthink. Use a model that supports adaptive thinking.",
+        )
+    except (httpx2.RequestError, ValueError, KeyError, TypeError):
+        return JaiResult(502, "Claude n Codex thinking returned no usable response.")
+
+    if not answer:
+        return JaiResult(502, "Claude n Codex thinking returned no final text.")
+
+    return JaiResult(
+        200,
+        answer,
+        metadata=JaiResultMetadata(
+            token_usage=JaiResultTokenUsage(
+                prompt_tokens=usage.get("input_tokens"),
+                completion_tokens=usage.get("output_tokens"),
+            ),
+        ),
     )

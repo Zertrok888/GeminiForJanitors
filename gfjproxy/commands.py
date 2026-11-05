@@ -233,6 +233,12 @@ def nobot(args, user, jai_req, response):
 
 
 @command()
+def deepthink(args, user, jai_req, response):
+    jai_req.use_deepthink = True
+    return response
+
+
+@command()
 def lore(args, user, jai_req, response):
     jai_req.use_lore = True
     return response
@@ -471,6 +477,8 @@ Preset commands need to be called every time you want to use them.
 - `//prefill_mode 0|1|2|3`
   Selects what kind of prefill/jailbreak to use: classic (0), interaction config (1), starter (2), combined (3).
 
+- `//deepthink`
+  Request high-effort adaptive thinking from Claude n Codex for this turn.
 - `//lore <topic>`
   Look up lore for this turn with Claude n Codex (one web search maximum).
 - `//search on|off|this`
