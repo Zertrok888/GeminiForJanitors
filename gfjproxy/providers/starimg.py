@@ -26,6 +26,23 @@ def starimg_generate_content(
     User paramater is only used for logging. A callable "stream" setting gets
     pieces of the response text as they are generated."""
 
+    return reseller_generate_content(
+        user, api_key, model, messages, settings,
+        url=STARIMG_URL, provider="starimg", label="AI STAR",
+    )
+
+
+def reseller_generate_content(
+    user: XUID,
+    api_key: str,
+    model: str,
+    messages: list[JaiMessage],
+    settings: dict[str, Any] | None = None,
+    *,
+    url: str,
+    provider: str,
+    label: str,
+) -> JaiResult:
     if len(messages) == 1 and messages[0].role == "assistant":
         # Claude requires the conversation to start with a user message
         messages.insert(0, JaiMessage(content=".", role="user"))
@@ -68,11 +85,11 @@ def starimg_generate_content(
     try:
         if stream_sink is not None:
             starimg_result = post_stream(
-                STARIMG_URL, starimg_request, headers, stream_sink
+                url, starimg_request, headers, stream_sink
             )
         else:
             starimg_response = http_client.post(
-                STARIMG_URL,
+                url,
                 json=starimg_request,
                 headers=headers,
                 timeout=PROCESS_TIMEOUT,
@@ -80,10 +97,10 @@ def starimg_generate_content(
             starimg_response.raise_for_status()
             starimg_result = starimg_response.json()
     except httpx2.TimeoutException:
-        track_stats("starimg.time_out")
+        track_stats(f"{provider}.time_out")
         return JaiResult(504, "Gateway Timeout")
     except httpx2.HTTPStatusError as e:
-        message = "Error from AI STAR"
+        message = f"Error from {label}"
 
         try:
             error = e.response.json().get("error")
@@ -99,20 +116,20 @@ def starimg_generate_content(
             message += f": {e.response.text}"
 
         if e.response.is_client_error:
-            track_stats("starimg.failed.client")
+            track_stats(f"{provider}.failed.client")
         elif e.response.is_server_error:
-            track_stats("starimg.failed.server")
+            track_stats(f"{provider}.failed.server")
         else:
-            track_stats("starimg.failed.unknown")
+            track_stats(f"{provider}.failed.unknown")
 
         return JaiResult(e.response.status_code, message)
     except StreamError as e:
-        track_stats("starimg.failed.server")
-        return JaiResult(502, f"Error from AI STAR: {e}")
+        track_stats(f"{provider}.failed.server")
+        return JaiResult(502, f"Error from {label}: {e}")
     except Exception as e:  # ruff: ignore[BLE001]
         xlog(user, repr(e))
-        track_stats("starimg.failed.exception")
-        return JaiResult(502, "Unhanded exception from AI STAR.")
+        track_stats(f"{provider}.failed.exception")
+        return JaiResult(502, f"Unhandled exception from {label}.")
 
     try:
         text = str(starimg_result["choices"][0]["message"]["content"] or "")
@@ -130,8 +147,8 @@ def starimg_generate_content(
     if not text:
         # Rejection?
         xlog(user, f"No result text: {starimg_result!r}")
-        track_stats("starimg.rejected")
+        track_stats(f"{provider}.rejected")
         return JaiResult(502, "Response blocked/empty.", metadata=metadata)
 
-    track_stats("starimg.succeeded")
+    track_stats(f"{provider}.succeeded")
     return JaiResult(200, text, metadata=metadata)

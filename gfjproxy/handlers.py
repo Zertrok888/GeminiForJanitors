@@ -1,5 +1,6 @@
 import re
 from collections.abc import Callable
+from functools import partial
 from random import randint
 from typing import Any, cast
 
@@ -15,7 +16,7 @@ from .providers.gemini_cli import gemini_cli_generate_content
 from .providers.nvidia import nvidia_generate_content
 from .providers.openrouter import openrouter_generate_content
 from .providers.proxy import proxy_generate_content
-from .providers.starimg import starimg_generate_content
+from .providers.starimg import reseller_generate_content, starimg_generate_content
 from .providers.z_ai import z_ai_generate_content
 from .statistics import track_stats
 from .utils import ResponseHelper
@@ -31,12 +32,19 @@ API_KEY_PREFIXES = {
     "sk-ant-": "anthropic",
     "sk-or-v1-": "openrouter",
     "sk-proj-": "openai",
+    "sk-myapi_": "claude_n_codex",
     "sk-star-": "starimg",
     "gfjproxy.gemini_cli.": "gemini_cli",
 }
 
 PROVIDER_FUNCS = {
     "cerebras": cerebras_generate_content,
+    "claude_n_codex": partial(
+        reseller_generate_content,
+        url="https://claude-n-codex.com:8443/v1/chat/completions",
+        provider="claude_n_codex",
+        label="Claude n Codex",
+    ),
     "deepseek": deepseek_generate_content,
     "gemini_cli": gemini_cli_generate_content,
     "google": gemini_generate_content,
